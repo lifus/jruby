@@ -1343,13 +1343,24 @@ public class RubyZlib {
             }
             return obj;
         }
+   
+        /**
+         * Get position within this stream including that has been read by
+         * users calling read + what jzlib may have speculatively read in
+         * because of buffering.
+         * @return number of bytes
+         */
+        private long internalPosition() {
+            com.jcraft.jzlib.Inflater inflater = io.getInflater();
+            return inflater.getTotalIn() + inflater.getAvailIn();
+        }
 
         @JRubyMethod
         public IRubyObject rewind() {
             Ruby rt = getRuntime();
             // should invoke seek on realIo...
             realIo.callMethod(rt.getCurrentContext(), "seek",
-                    new IRubyObject[]{rt.newFixnum(-io.getTotalIn()), rt.newFixnum(Stream.SEEK_CUR)});
+                    new IRubyObject[]{rt.newFixnum(-internalPosition()), rt.newFixnum(Stream.SEEK_CUR)});
             // ... and then reinitialize
             initialize(realIo);
             return getRuntime().getNil();

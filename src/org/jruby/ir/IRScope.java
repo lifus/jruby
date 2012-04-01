@@ -14,6 +14,7 @@ import org.jruby.ir.passes.CompilerPass;
 import org.jruby.ir.passes.IRPrinter;
 import org.jruby.ir.passes.InlineTest;
 import org.jruby.ir.passes.LinearizeCFG;
+import org.jruby.ir.passes.AddLocalVarLoadStoreInstructions;
 import org.jruby.ir.passes.LiveVariableAnalysis;
 import org.jruby.ir.passes.opts.DeadCodeElimination;
 import org.jruby.ir.passes.opts.LocalOptimizationPass;
@@ -472,10 +473,13 @@ public abstract class IRScope {
         return cfg;
     }
 
+    // SSS FIXME: No longer relevant?
     public void runCompilerPassOnNestedScopes(CompilerPass p) {
         // Do nothing...subclasses should override
     }
 
+    // SSS FIXME: Can be simplified to "p.run(this)"
+    // since every pass handle nested scopes on its own
     public void runCompilerPass(CompilerPass p) {
         boolean isPreOrder = p.isPreOrder();
 
@@ -574,6 +578,9 @@ public abstract class IRScope {
             runCompilerPass(new LocalOptimizationPass());
             printPass("After inline");
         }        
+
+        if (RubyInstanceConfig.IR_OPT_LVAR_ACCESS) runCompilerPass(new AddLocalVarLoadStoreInstructions());
+
         // Do not run dead-code-elimination on eval-scripts because they might
         // update their enclosing environments.
         if (!(this instanceof IREvalScript)) {
@@ -829,12 +836,12 @@ public abstract class IRScope {
         if (reset || evalScopeVars == null) evalScopeVars = new LocalVariableAllocator();
     }
     
-    public Variable getNewTemporaryVariable() {
+    public TemporaryVariable getNewTemporaryVariable() {
         temporaryVariableIndex++;
         return new TemporaryVariable(temporaryVariableIndex);
     }    
 
-    public Variable getNewTemporaryVariable(String name) {
+    public TemporaryVariable getNewTemporaryVariable(String name) {
         temporaryVariableIndex++;
         return new TemporaryVariable(name, temporaryVariableIndex);
     }    
@@ -868,9 +875,12 @@ public abstract class IRScope {
     public int getUsedVariablesCount() {
         // System.out.println("For " + this + ", # lvs: " + nextLocalVariableSlot);
         // # local vars, # flip vars
-        return localVars.nextSlot + getPrefixCountSize("%flip");
+        //
+        // SSS FIXME: When we are opting local var access, 
+        // no need to allocate local var space except when we have been asked to!
+        return getLocalVariablesCount() + getPrefixCountSize("%flip");
     }
-    
+
     public void setUpUseDefLocalVarMaps() {
         definedLocalVars = new java.util.HashSet<Variable>();
         usedLocalVars = new java.util.HashSet<Variable>();

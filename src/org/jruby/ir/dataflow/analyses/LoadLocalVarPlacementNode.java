@@ -3,6 +3,7 @@ package org.jruby.ir.dataflow.analyses;
 import java.util.HashSet;
 import java.util.List;
 import java.util.ListIterator;
+import java.util.Map;
 import java.util.Set;
 import org.jruby.ir.IRClosure;
 import org.jruby.ir.IRScope;
@@ -11,17 +12,18 @@ import org.jruby.ir.dataflow.DataFlowProblem;
 import org.jruby.ir.dataflow.FlowGraphNode;
 import org.jruby.ir.instructions.CallBase;
 import org.jruby.ir.instructions.Instr;
-import org.jruby.ir.instructions.LoadFromBindingInstr;
+import org.jruby.ir.instructions.LoadLocalVarInstr;
 import org.jruby.ir.instructions.ResultInstr;
 import org.jruby.ir.operands.ClosureLocalVariable;
 import org.jruby.ir.operands.LocalVariable;
 import org.jruby.ir.operands.Operand;
+import org.jruby.ir.operands.TemporaryVariable;
 import org.jruby.ir.operands.Variable;
 import org.jruby.ir.operands.WrappedIRClosure;
 import org.jruby.ir.representations.BasicBlock;
 
-public class BindingLoadPlacementNode extends FlowGraphNode {
-    public BindingLoadPlacementNode(DataFlowProblem prob, BasicBlock n) {
+public class LoadLocalVarPlacementNode extends FlowGraphNode {
+    public LoadLocalVarPlacementNode(DataFlowProblem prob, BasicBlock n) {
         super(prob, n);
     }
 
@@ -38,12 +40,12 @@ public class BindingLoadPlacementNode extends FlowGraphNode {
 
     public void initSolnForNode() {
         if (basicBlock == problem.getScope().cfg().getExitBB()) {
-            inRequiredLoads = ((BindingLoadPlacementProblem) problem).getLoadsOnScopeExit();
+            inRequiredLoads = ((LoadLocalVarPlacementProblem) problem).getLoadsOnScopeExit();
         }
     }
 
     public void compute_MEET(BasicBlock source, FlowGraphNode pred) {
-        BindingLoadPlacementNode n = (BindingLoadPlacementNode) pred;
+        LoadLocalVarPlacementNode n = (LoadLocalVarPlacementNode) pred;
         inRequiredLoads.addAll(n.outRequiredLoads);
     }
 
@@ -68,17 +70,13 @@ public class BindingLoadPlacementNode extends FlowGraphNode {
                 Operand o = call.getClosureArg(null);
                 if (o != null && o instanceof WrappedIRClosure) {
                     IRClosure cl = ((WrappedIRClosure) o).getClosure();
-                    BindingLoadPlacementProblem cl_blp = new BindingLoadPlacementProblem();
-                    cl_blp.initLoadsOnScopeExit(reqdLoads);
-                    cl_blp.setup(cl);
-                    cl_blp.compute_MOP_Solution();
-                    cl.setDataFlowSolution(cl_blp.getName(), cl_blp);
 
                     // Variables defined in the closure do not need to be loaded anymore at
-                    // program points before the call.
+                    // program points before the call, because they will be loaded after the
+						  // call completes to fetch the latest value.
                     Set<LocalVariable> newReqdLoads = new HashSet<LocalVariable>(reqdLoads);
                     for (LocalVariable v : reqdLoads) {
-                        if (cl_blp.scopeDefinesVariable(v)) {
+                        if (cl.definesLocalVariable(v)) {
                            newReqdLoads.remove((LocalVariable)v);
                         }
                     }
@@ -119,9 +117,18 @@ public class BindingLoadPlacementNode extends FlowGraphNode {
         return "";
     }
 
-    public void addLoads() {
-        BindingLoadPlacementProblem blp = (BindingLoadPlacementProblem) problem;
-        IRScope s = blp.getScope().cfg().getScope();
+    private TemporaryVariable getLocalVarReplacement(LocalVariable v, IRScope scope, Map<Operand, Operand> varRenameMap) {
+         TemporaryVariable value = (TemporaryVariable)varRenameMap.get(v);
+         if (value == null) {
+             value = scope.getNewTemporaryVariable("%t_" + v.getName());
+             varRenameMap.put(v, value);
+         }
+         return value;
+    }
+
+    public void addLoads(Map<Operand, Operand> varRenameMap) {
+        LoadLocalVarPlacementProblem blp = (LoadLocalVarPlacementProblem) problem;
+        IRScope s = blp.getScope();
         List<Instr> instrs = basicBlock.getInstrs();
         ListIterator<Instr> it = instrs.listIterator(instrs.size());
         Set<LocalVariable> reqdLoads = new HashSet<LocalVariable>(inRequiredLoads);
@@ -137,32 +144,28 @@ public class BindingLoadPlacementNode extends FlowGraphNode {
                 CallBase call = (CallBase) i;
                 Operand o = call.getClosureArg(null);
                 if (o != null && o instanceof WrappedIRClosure) {
-                    IRClosure scope = ((WrappedIRClosure) o).getClosure();
-                    BindingLoadPlacementProblem cl_blp = (BindingLoadPlacementProblem) scope.getDataFlowSolution(blp.getName());
+                    IRClosure cl = ((WrappedIRClosure) o).getClosure();
 
                     // Only those variables that are defined in the closure, and are in the required loads set 
                     // will need to be loaded from the binding after the call!  Rest can wait ..
                     Set<LocalVariable> newReqdLoads = new HashSet<LocalVariable>(reqdLoads);
                     it.next();
                     for (LocalVariable v : reqdLoads) {
-                        if (cl_blp.scopeDefinesVariable(v)) {
-                            it.add(new LoadFromBindingInstr(s, v));
+                        if (cl.definesLocalVariable(v)) {
+                            it.add(new LoadLocalVarInstr(s, getLocalVarReplacement(v, s, varRenameMap), v));
                             it.previous();
                             newReqdLoads.remove(v);
                         }
                     }
                     it.previous();
                     reqdLoads = newReqdLoads;
-
-                    // add loads in the closure
-                    ((BindingLoadPlacementProblem) scope.getDataFlowSolution(blp.getName())).addLoads();
                 } 
 
                 // In this case, we are going to blindly load everything
                 if (call.targetRequiresCallersBinding()) {
                     it.next();
                     for (LocalVariable v : reqdLoads) {
-                        it.add(new LoadFromBindingInstr(s, v));
+                        it.add(new LoadLocalVarInstr(s, getLocalVarReplacement(v, s, varRenameMap), v));
                         it.previous();
                     }
                     it.previous();
@@ -172,9 +175,14 @@ public class BindingLoadPlacementNode extends FlowGraphNode {
 
             // The variables used as arguments will need to be loaded
             // %self is local to every scope and never crosses scope boundaries and need not be spilled/refilled
-            for (Variable x : i.getUsedVariables()) {
-                if ((x instanceof LocalVariable) && !((LocalVariable)x).isSelf()) {
-                    reqdLoads.add((LocalVariable)x);
+            for (Variable v : i.getUsedVariables()) {
+                if (!(v instanceof LocalVariable)) continue;
+
+                LocalVariable lv = (LocalVariable)v;
+                if (!lv.isSelf()) {
+                    reqdLoads.add(lv);
+                    // Make sure there is a replacement var for all local vars
+                    getLocalVarReplacement(lv, s, varRenameMap);
                 }
             }
         }
@@ -184,15 +192,15 @@ public class BindingLoadPlacementNode extends FlowGraphNode {
             // System.out.println("\n[In Entry BB] For CFG " + _prob.getCFG() + ":");
             // System.out.println("\t--> Reqd loads   : " + java.util.Arrays.toString(reqdLoads.toArray()));
             for (LocalVariable v : reqdLoads) {
-                if (blp.scopeUsesVariable(v)) {
+                if (s.usesLocalVariable(v)) {
                     if (v instanceof ClosureLocalVariable) {
                         IRClosure definingScope = ((ClosureLocalVariable)v).definingScope;
                         
                         if ((s != definingScope) && s.isNestedInClosure(definingScope)) {
-                            it.add(new LoadFromBindingInstr(s, v));
+                            it.add(new LoadLocalVarInstr(s, getLocalVarReplacement(v, s, varRenameMap), v));
                         }
                     } else {
-                        it.add(new LoadFromBindingInstr(s, v));
+                        it.add(new LoadLocalVarInstr(s, getLocalVarReplacement(v, s, varRenameMap), v));
                     }
                 }
             }

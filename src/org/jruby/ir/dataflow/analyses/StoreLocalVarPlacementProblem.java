@@ -2,20 +2,21 @@ package org.jruby.ir.dataflow.analyses;
 
 import org.jruby.ir.IRClosure;
 import org.jruby.ir.IRScope;
-import org.jruby.ir.instructions.ReceiveExceptionInstr;
-import org.jruby.ir.instructions.StoreToBindingInstr;
-import org.jruby.ir.instructions.ThrowExceptionInstr;
-import org.jruby.ir.representations.BasicBlock;
 import org.jruby.ir.dataflow.DataFlowProblem;
 import org.jruby.ir.dataflow.FlowGraphNode;
+import org.jruby.ir.instructions.ReceiveExceptionInstr;
+import org.jruby.ir.instructions.StoreLocalVarInstr;
+import org.jruby.ir.instructions.ThrowExceptionInstr;
 import org.jruby.ir.operands.Label;
-import org.jruby.ir.operands.Variable;
 import org.jruby.ir.operands.LocalVariable;
-
-import java.util.Set;
-import java.util.HashSet;
-import org.jruby.ir.IRScope;
+import org.jruby.ir.operands.Operand;
+import org.jruby.ir.operands.Variable;
+import org.jruby.ir.representations.BasicBlock;
 import org.jruby.ir.representations.CFG;
+
+import java.util.Map;
+import java.util.HashSet;
+import java.util.Set;
 
 // This problem tries to find places to insert binding stores -- for spilling local variables onto a heap store
 // It does better than spilling all local variables to the heap at all call sites.  This is similar to a
@@ -25,9 +26,9 @@ import org.jruby.ir.representations.CFG;
 // strictly speaking, this is a AND of two independent dataflow analyses -- we are doing these together for
 // efficiency reasons, and also because the binding allocation problem is also a forwards flow problem and is a
 // relatively straightforward analysis.
-public class BindingStorePlacementProblem extends DataFlowProblem {
+public class StoreLocalVarPlacementProblem extends DataFlowProblem {
 
-    public BindingStorePlacementProblem() {
+    public StoreLocalVarPlacementProblem() {
         super(DataFlowProblem.DF_Direction.FORWARD);
     }
 
@@ -36,7 +37,7 @@ public class BindingStorePlacementProblem extends DataFlowProblem {
     }
 
     public FlowGraphNode buildFlowGraphNode(BasicBlock bb) {
-        return new BindingStorePlacementNode(this, bb);
+        return new StoreLocalVarPlacementNode(this, bb);
     }
 
     @Override
@@ -44,15 +45,7 @@ public class BindingStorePlacementProblem extends DataFlowProblem {
         return "";
     }
 
-    public boolean scopeDefinesVariable(Variable v) {
-        return getScope().cfg().getScope().definesLocalVariable(v);
-    }
-
-    public boolean scopeUsesVariable(Variable v) {
-        return getScope().cfg().getScope().usesLocalVariable(v);
-    }
-
-    public void addStoreAndBindingAllocInstructions() {
+    public void addStoreAndBindingAllocInstructions(Map<Operand, Operand> varRenameMap) {
         /* --------------------------------------------------------------------
          * If this is a closure, introduce a global ensure block that spills
          * into the binding the union of dirty vars from all call sites that
@@ -72,11 +65,11 @@ public class BindingStorePlacementProblem extends DataFlowProblem {
         }
 
         for (FlowGraphNode n : flowGraphNodes) {
-            BindingStorePlacementNode bspn = (BindingStorePlacementNode) n;
+            StoreLocalVarPlacementNode bspn = (StoreLocalVarPlacementNode) n;
             if (mightRequireGlobalEnsureBlock && !cfg.bbIsProtected(bspn.getBB())) {
-                bspn.addStoreAndBindingAllocInstructions(dirtyVars);
+                bspn.addStoreAndBindingAllocInstructions(varRenameMap, dirtyVars);
             } else {
-                bspn.addStoreAndBindingAllocInstructions(null);
+                bspn.addStoreAndBindingAllocInstructions(varRenameMap, null);
             }
         }
 
@@ -85,7 +78,12 @@ public class BindingStorePlacementProblem extends DataFlowProblem {
             Variable exc = cfgScope.getNewTemporaryVariable();
             geb.addInstr(new ReceiveExceptionInstr(exc));
             for (LocalVariable v : dirtyVars) {
-                geb.addInstr(new StoreToBindingInstr((IRClosure) cfgScope, v));
+                Operand value = varRenameMap.get(v);
+                if (value == null) {
+                    value = cfgScope.getNewTemporaryVariable("%t_" + v.getName());
+                    varRenameMap.put(v, value);
+                }
+                geb.addInstr(new StoreLocalVarInstr(value, (IRClosure) cfgScope, v));
             }
             geb.addInstr(new ThrowExceptionInstr(exc));
             cfg.addGlobalEnsureBlock(geb);
